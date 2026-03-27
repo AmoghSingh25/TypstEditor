@@ -1,0 +1,138 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A01 /* TypstEditorApp.swift in Sources */   = {isa = PBXBuildFile; fileRef = B01; };
+		A02 /* ContentView.swift in Sources */      = {isa = PBXBuildFile; fileRef = B02; };
+		A03 /* AppState.swift in Sources */         = {isa = PBXBuildFile; fileRef = B03; };
+		A04 /* SidebarView.swift in Sources */      = {isa = PBXBuildFile; fileRef = B04; };
+		A05 /* TypstTextEditor.swift in Sources */  = {isa = PBXBuildFile; fileRef = B05; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B01 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/TypstEditorApp.swift; sourceTree = SOURCE_ROOT; };
+		B02 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/ContentView.swift; sourceTree = SOURCE_ROOT; };
+		B03 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/AppState.swift; sourceTree = SOURCE_ROOT; };
+		B04 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/SidebarView.swift; sourceTree = SOURCE_ROOT; };
+		B05 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/TypstTextEditor.swift; sourceTree = SOURCE_ROOT; };
+		B06 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = TypstEditor/Info.plist; sourceTree = SOURCE_ROOT; };
+		PROD = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TypstEditor.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		ROOT = {isa = PBXGroup; children = (SRCGRP, PRODUCTS); sourceTree = "<group>"; };
+		PRODUCTS = {isa = PBXGroup; children = (PROD); name = Products; sourceTree = "<group>"; };
+		SRCGRP = {isa = PBXGroup; children = (B01, B02, B03, B04, B05, B06); name = TypstEditor; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		TARGET = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TARGETCONFLIST;
+			buildPhases = (SRCPHASE);
+			buildRules = ();
+			dependencies = ();
+			name = TypstEditor;
+			productName = TypstEditor;
+			productReference = PROD;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		PROJECT = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = { TARGET = { CreatedOnToolsVersion = 15.0; }; };
+			};
+			buildConfigurationList = PROJCONFLIST;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = ROOT;
+			productRefGroup = PRODUCTS;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (TARGET);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		SRCPHASE = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A01, A02, A03, A04, A05);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		DBGCONF = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TypstEditor/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.typsteditor.app";
+				PRODUCT_NAME = TypstEditor;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		RELCONF = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TypstEditor/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.typsteditor.app";
+				PRODUCT_NAME = TypstEditor;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		PROJDBG = {
+			isa = XCBuildConfiguration;
+			buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; };
+			name = Debug;
+		};
+		PROJREL = {
+			isa = XCBuildConfiguration;
+			buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; };
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		PROJCONFLIST = {
+			isa = XCConfigurationList;
+			buildConfigurations = (PROJDBG, PROJREL);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		TARGETCONFLIST = {
+			isa = XCConfigurationList;
+			buildConfigurations = (DBGCONF, RELCONF);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = PROJECT;
+}
