@@ -215,9 +215,20 @@ struct TypEditorView: View {
         } else {
             Color(NSColor.windowBackgroundColor)
                 .frame(maxWidth:.infinity, maxHeight:.infinity)
-                .overlay(Text(state.findTypst() == nil
-                    ? "typst not found — brew install typst" : "Waiting for typst watch…")
-                    .foregroundColor(.secondary).font(.system(size:13)))
+                .overlay(
+                    VStack(spacing: 8) {
+                        if state.findTypst() == nil {
+                            Text("typst not found — brew install typst")
+                                .foregroundColor(.secondary).font(.system(size:13))
+                        } else if state.isCompiling {
+                            ProgressView().scaleEffect(0.8)
+                            Text("Starting…").foregroundColor(.secondary).font(.system(size:12))
+                        } else {
+                            Text("Open a .typ file to see a preview")
+                                .foregroundColor(.secondary).font(.system(size:13))
+                        }
+                    }
+                )
         }
     }
 

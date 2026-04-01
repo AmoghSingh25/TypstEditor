@@ -37,8 +37,11 @@ final class AppState: ObservableObject {
     @Published var tabs: [EditorTab]    = []
     @Published var activeTabID: UUID?   = nil
 
-    private var tabContents:   [URL: String] = [:]
-    private var savedContents: [URL: String] = [:]
+    private var tabContents:   [URL: String]      = [:]
+    private var savedContents: [URL: String]      = [:]
+    // Per-tab PDF cache — keeps the last good rendered PDF for each open file
+    private var tabPDFs:       [URL: PDFDocument] = [:]
+    private var tabExportURLs: [URL: URL]         = [:]
 
     var activeTab: EditorTab? { tabs.first { $0.id == activeTabID } }
     var activeURL: URL?       { activeTab?.url }
@@ -75,6 +78,7 @@ final class AppState: ObservableObject {
     private var watchTimer: Timer?         // debounce writes (50 ms)
     private var outputPoller: Timer?       // poll for new PDF (100 ms)
     private var lastPDFModDate: Date?      // detect when typst rewrites the PDF
+    // Removed swapTimer as requested
 
     // MARK: - Project
 
@@ -130,7 +134,7 @@ final class AppState: ObservableObject {
         savedContents[url] = text
         tabs.append(tab)
         activeTabID = tab.id
-        clearPDF()
+//        clearPDF()  // fresh tab — no cached PDF yet, blank is correct
         if url.pathExtension == "typ" { startWatch() }
     }
 
@@ -157,7 +161,8 @@ final class AppState: ObservableObject {
     func selectTab(_ tab: EditorTab) {
         saveActive()
         activeTabID = tab.id
-        clearPDF()
+        // Restore the last good PDF for this tab (don't blank out)
+        restoreCachedPDF(for: tab.url)
         if tab.isTyp { switchWatchToActive() }
     }
 
@@ -167,14 +172,16 @@ final class AppState: ObservableObject {
         tabs.remove(at: idx)
         tabContents.removeValue(forKey: tab.url)
         savedContents.removeValue(forKey: tab.url)
+        tabPDFs.removeValue(forKey: tab.url)
+        tabExportURLs.removeValue(forKey: tab.url)
         if tabs.isEmpty {
             activeTabID = nil
             stopWatch()
-            clearPDF()
+//            clearPDF()
         } else {
             let newIdx = min(idx, tabs.count - 1)
             activeTabID = tabs[newIdx].id
-            clearPDF()
+            restoreCachedPDF(for: tabs[newIdx].url)
             if tabs[newIdx].isTyp { switchWatchToActive() }
         }
     }
@@ -299,6 +306,7 @@ final class AppState: ObservableObject {
     func stopWatch() {
         watchTimer?.invalidate();   watchTimer   = nil
         outputPoller?.invalidate(); outputPoller = nil
+        // Removed swapTimer invalidation as requested
         watchProcess?.terminate();  watchProcess = nil
         // Delete the temp source file we placed next to the user's real file
         if let src = watchSrcURL { try? FileManager.default.removeItem(at: src) }
@@ -323,6 +331,7 @@ final class AppState: ObservableObject {
         // some watchers miss; direct write modifies the inode typst is watching
     }
 
+    // Replaced pollPDFOutput() with requested implementation
     private func pollPDFOutput() {
         guard let outURL = watchOutURL else { return }
         let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path)
@@ -332,11 +341,12 @@ final class AppState: ObservableObject {
 
         // New PDF written — load it
         guard let doc = PDFDocument(url: outURL) else { return }
-        let prevPDF = lastExportURL
-        pdfDocument = nil
-        if let prev = prevPDF, prev != outURL {
-            try? FileManager.default.removeItem(at: prev)
+        // Cache for this tab so switching back shows the last good render
+        if let url = activeURL {
+            tabPDFs[url]       = doc
+            tabExportURLs[url] = outURL
         }
+        // Swap directly — no nil flash between old and new
         pdfDocument   = doc
         lastExportURL = outURL
         compileCount += 1
@@ -344,6 +354,8 @@ final class AppState: ObservableObject {
         isCompiling   = false
         totalPages    = doc.pageCount
     }
+
+    // Removed the entire attemptSwapToLatestPDF() function as requested
 
     // MARK: - Page navigation
 
@@ -383,7 +395,20 @@ final class AppState: ObservableObject {
     private func clearPDF() {
         pdfDocument   = nil
         errorMessage  = ""
-        // Don't delete lastExportURL here — watch reuses the same output file
+        lastExportURL = nil
+        totalPages    = 0
+        currentPage   = 1
+    }
+
+    private func restoreCachedPDF(for url: URL) {
+        if let cached = tabPDFs[url] {
+            pdfDocument   = cached
+            lastExportURL = tabExportURLs[url]
+            totalPages    = cached.pageCount
+            errorMessage  = ""
+        } else {
+            
+        }
     }
 }
 
