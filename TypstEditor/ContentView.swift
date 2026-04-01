@@ -271,6 +271,15 @@ struct PlainTextEditorView: View {
 }
 
 // MARK: - PDF Preview
+//
+// Uses a wrapper NSView that holds the PDFView as a child.  When a new document
+// arrives we:
+//   1. Snapshot the current PDFView pixels into a CALayer (freeze the screen).
+//   2. Swap the PDFDocument (PDFView goes blank internally for one frame).
+//   3. Wait one runloop pass for PDFView to finish layout.
+//   4. Restore scroll position.
+//   5. Fade the snapshot layer out — by the time it's gone PDFView is painted.
+// This completely hides the internal blank flash.
 
 struct PDFPreview: NSViewRepresentable {
     let document: PDFDocument
@@ -278,66 +287,32 @@ struct PDFPreview: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> PDFView {
-        let v = PDFView()
-        v.autoScales = true
-        v.displayMode = .singlePageContinuous
-        v.displayDirection = .vertical
-        v.backgroundColor = .white
-        v.document = document
+    func makeNSView(context: Context) -> FlickerFreePDFContainer {
+        let container = FlickerFreePDFContainer()
+        container.setDocument(document, animate: false)
 
-        // Observe page changes and forward to SwiftUI via notification
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.pageChanged(_:)),
             name: .PDFViewPageChanged,
-            object: v)
+            object: container.pdfView)
 
-        // Observe jump-to-page requests
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.handleJump(_:)),
             name: .jumpToPage,
             object: nil)
-        context.coordinator.pdfView = v
-        return v
+        context.coordinator.container = container
+        return container
     }
 
-    func updateNSView(_ v: PDFView, context: Context) {
-        guard v.document !== document else { return }
-
-        let scrollView = v.documentView?.enclosingScrollView
-        let docView    = v.documentView
-        var scrollFraction: CGFloat = 0
-        if let dv = docView, dv.bounds.height > 0 {
-            let vis = scrollView?.documentVisibleRect ?? dv.visibleRect
-            scrollFraction = vis.minY / dv.bounds.height
-        }
-        let pageIndex = v.currentPage.flatMap { v.document?.index(for: $0) }
-        var pageOffset: CGFloat = 0
-        if let page = v.currentPage, let dv = docView {
-            let pageRect = v.convert(page.bounds(for: v.displayBox), from: page)
-            let visMin   = scrollView?.documentVisibleRect.minY ?? dv.visibleRect.minY
-            pageOffset   = visMin - pageRect.minY
-        }
-
-        v.document = document
-
-        DispatchQueue.main.async {
-            guard let dv = v.documentView else { return }
-            if let idx = pageIndex, let newPage = document.page(at: idx) {
-                let pageRect = v.convert(newPage.bounds(for: v.displayBox), from: newPage)
-                let targetY  = pageRect.minY + pageOffset
-                let maxY     = dv.bounds.height - (scrollView?.contentSize.height ?? 0)
-                dv.scroll(NSPoint(x: 0, y: max(0, min(targetY, maxY))))
-            } else {
-                dv.scroll(NSPoint(x: 0, y: scrollFraction * dv.bounds.height))
-            }
-        }
+    func updateNSView(_ container: FlickerFreePDFContainer, context: Context) {
+        guard container.pdfView.document !== document else { return }
+        container.setDocument(document, animate: true)
     }
 
     final class Coordinator: NSObject {
-        weak var pdfView: PDFView?
+        weak var container: FlickerFreePDFContainer?
 
         @objc func pageChanged(_ note: Notification) {
             guard let v = note.object as? PDFView,
@@ -349,10 +324,135 @@ struct PDFPreview: NSViewRepresentable {
 
         @objc func handleJump(_ note: Notification) {
             guard let page = note.object as? Int,
-                  let v = pdfView,
-                  let doc = v.document,
+                  let c = container,
+                  let doc = c.pdfView.document,
                   let p = doc.page(at: page - 1) else { return }
-            DispatchQueue.main.async { v.go(to: p) }
+            DispatchQueue.main.async { c.pdfView.go(to: p) }
+        }
+    }
+}
+
+// MARK: - FlickerFreePDFContainer
+
+final class FlickerFreePDFContainer: NSView {
+    let pdfView = PDFView()
+    private var snapshotLayer: CALayer?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = .white
+        pdfView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(pdfView)
+        NSLayoutConstraint.activate([
+            pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pdfView.topAnchor.constraint(equalTo: topAnchor),
+            pdfView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setDocument(_ doc: PDFDocument, animate: Bool) {
+        if animate {
+            swapWithSnapshot(doc)
+        } else {
+            pdfView.document = doc
+        }
+    }
+
+    private func swapWithSnapshot(_ newDoc: PDFDocument) {
+        // 1. Capture the current pixels
+        let snapshot = makeSnapshot()
+
+        // 2. Save scroll position
+        let scrollInfo = captureScrollPosition()
+
+        // 3. Swap the document — PDFView blanks internally here
+        pdfView.document = newDoc
+
+        // 4. Immediately overlay the snapshot so the user sees no blank
+        if let snap = snapshot {
+            snap.frame = bounds
+            snap.zPosition = 1000
+            layer?.addSublayer(snap)
+            snapshotLayer = snap
+        }
+
+        // 5. Give PDFView one runloop pass to layout, then restore scroll
+        //    and fade the snapshot out
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.restoreScrollPosition(scrollInfo, in: newDoc)
+
+            // Short delay so PDFView finishes painting before we remove cover
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self, let snap = self.snapshotLayer else { return }
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.08)
+                CATransaction.setCompletionBlock { snap.removeFromSuperlayer() }
+                snap.opacity = 0
+                CATransaction.commit()
+                self.snapshotLayer = nil
+            }
+        }
+    }
+
+    private func makeSnapshot() -> CALayer? {
+        guard let contentLayer = pdfView.layer else { return nil }
+        let snap = CALayer()
+        snap.contents = contentLayer.contents
+        // Walk subviews to find the scroll content and render it
+        if let bitmapRep = pdfView.bitmapImageRepForCachingDisplay(in: pdfView.bounds) {
+            pdfView.cacheDisplay(in: pdfView.bounds, to: bitmapRep)
+            if let cgImage = bitmapRep.cgImage {
+                let imageLayer = CALayer()
+                imageLayer.frame = bounds
+                imageLayer.contents = cgImage
+                imageLayer.contentsGravity = .resize
+                return imageLayer
+            }
+        }
+        return nil
+    }
+
+    private struct ScrollInfo {
+        let pageIndex: Int?
+        let pageOffset: CGFloat
+        let fraction: CGFloat
+    }
+
+    private func captureScrollPosition() -> ScrollInfo {
+        let sv = pdfView.documentView?.enclosingScrollView
+        let dv = pdfView.documentView
+        var fraction: CGFloat = 0
+        if let dv, dv.bounds.height > 0 {
+            let vis = sv?.documentVisibleRect ?? dv.visibleRect
+            fraction = vis.minY / dv.bounds.height
+        }
+        let pageIndex = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
+        var pageOffset: CGFloat = 0
+        if let page = pdfView.currentPage, let dv {
+            let pageRect = pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
+            let visMin   = sv?.documentVisibleRect.minY ?? dv.visibleRect.minY
+            pageOffset   = visMin - pageRect.minY
+        }
+        return ScrollInfo(pageIndex: pageIndex, pageOffset: pageOffset, fraction: fraction)
+    }
+
+    private func restoreScrollPosition(_ info: ScrollInfo, in doc: PDFDocument) {
+        guard let dv = pdfView.documentView else { return }
+        let sv = dv.enclosingScrollView
+        if let idx = info.pageIndex, let newPage = doc.page(at: idx) {
+            let pageRect = pdfView.convert(newPage.bounds(for: pdfView.displayBox), from: newPage)
+            let targetY  = pageRect.minY + info.pageOffset
+            let maxY     = dv.bounds.height - (sv?.contentSize.height ?? 0)
+            dv.scroll(NSPoint(x: 0, y: max(0, min(targetY, maxY))))
+        } else {
+            dv.scroll(NSPoint(x: 0, y: info.fraction * dv.bounds.height))
         }
     }
 }

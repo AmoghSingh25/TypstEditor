@@ -78,7 +78,6 @@ final class AppState: ObservableObject {
     private var watchTimer: Timer?         // debounce writes (50 ms)
     private var outputPoller: Timer?       // poll for new PDF (100 ms)
     private var lastPDFModDate: Date?      // detect when typst rewrites the PDF
-    // Removed swapTimer as requested
 
     // MARK: - Project
 
@@ -134,7 +133,7 @@ final class AppState: ObservableObject {
         savedContents[url] = text
         tabs.append(tab)
         activeTabID = tab.id
-//        clearPDF()  // fresh tab — no cached PDF yet, blank is correct
+        clearPDF()  // fresh tab — no cached PDF yet, blank is correct
         if url.pathExtension == "typ" { startWatch() }
     }
 
@@ -177,7 +176,7 @@ final class AppState: ObservableObject {
         if tabs.isEmpty {
             activeTabID = nil
             stopWatch()
-//            clearPDF()
+            clearPDF()
         } else {
             let newIdx = min(idx, tabs.count - 1)
             activeTabID = tabs[newIdx].id
@@ -306,7 +305,6 @@ final class AppState: ObservableObject {
     func stopWatch() {
         watchTimer?.invalidate();   watchTimer   = nil
         outputPoller?.invalidate(); outputPoller = nil
-        // Removed swapTimer invalidation as requested
         watchProcess?.terminate();  watchProcess = nil
         // Delete the temp source file we placed next to the user's real file
         if let src = watchSrcURL { try? FileManager.default.removeItem(at: src) }
@@ -331,7 +329,6 @@ final class AppState: ObservableObject {
         // some watchers miss; direct write modifies the inode typst is watching
     }
 
-    // Replaced pollPDFOutput() with requested implementation
     private func pollPDFOutput() {
         guard let outURL = watchOutURL else { return }
         let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path)
@@ -343,7 +340,7 @@ final class AppState: ObservableObject {
         guard let doc = PDFDocument(url: outURL) else { return }
         // Cache for this tab so switching back shows the last good render
         if let url = activeURL {
-            tabPDFs[url]       = doc
+            tabPDFs[url]      = doc
             tabExportURLs[url] = outURL
         }
         // Swap directly — no nil flash between old and new
@@ -354,8 +351,6 @@ final class AppState: ObservableObject {
         isCompiling   = false
         totalPages    = doc.pageCount
     }
-
-    // Removed the entire attemptSwapToLatestPDF() function as requested
 
     // MARK: - Page navigation
 
@@ -407,7 +402,7 @@ final class AppState: ObservableObject {
             totalPages    = cached.pageCount
             errorMessage  = ""
         } else {
-            
+            clearPDF()
         }
     }
 }
