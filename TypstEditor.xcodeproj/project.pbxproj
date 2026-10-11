@@ -11,6 +11,7 @@
 		A03 /* AppState.swift in Sources */         = {isa = PBXBuildFile; fileRef = B03; };
 		A04 /* SidebarView.swift in Sources */      = {isa = PBXBuildFile; fileRef = B04; };
 		A05 /* TypstTextEditor.swift in Sources */  = {isa = PBXBuildFile; fileRef = B05; };
+		A06 /* TypstNativeCompiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B07; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,20 +21,21 @@
 		B04 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/SidebarView.swift; sourceTree = SOURCE_ROOT; };
 		B05 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/TypstTextEditor.swift; sourceTree = SOURCE_ROOT; };
 		B06 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = TypstEditor/Info.plist; sourceTree = SOURCE_ROOT; };
+		B07 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypstEditor/TypstNativeCompiler.swift; sourceTree = SOURCE_ROOT; };
 		PROD = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TypstEditor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		ROOT = {isa = PBXGroup; children = (SRCGRP, PRODUCTS); sourceTree = "<group>"; };
 		PRODUCTS = {isa = PBXGroup; children = (PROD); name = Products; sourceTree = "<group>"; };
-		SRCGRP = {isa = PBXGroup; children = (B01, B02, B03, B04, B05, B06); name = TypstEditor; sourceTree = "<group>"; };
+		SRCGRP = {isa = PBXGroup; children = (B01, B02, B03, B04, B05, B06, B07); name = TypstEditor; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
 		TARGET = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = TARGETCONFLIST;
-			buildPhases = (SRCPHASE);
+			buildPhases = (SRCPHASE, RUSTPHASE);
 			buildRules = ();
 			dependencies = ();
 			name = TypstEditor;
@@ -68,10 +70,24 @@
 		SRCPHASE = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A01, A02, A03, A04, A05);
+			files = (A01, A02, A03, A04, A05, A06);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		RUSTPHASE = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ("$(SRCROOT)/native/typst-engine/Cargo.toml", "$(SRCROOT)/native/typst-engine/Cargo.lock", "$(SRCROOT)/native/typst-engine/src/lib.rs");
+			name = "Build embedded Typst engine";
+			outputPaths = ("$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libtypst_editor_native.dylib");
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nexport PATH=\"${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"\nBUILD_ARCH=\"$CURRENT_ARCH\"\nif [ -z \"$BUILD_ARCH\" ] || [ \"$BUILD_ARCH\" = \"undefined_arch\" ]; then BUILD_ARCH=\"$NATIVE_ARCH_ACTUAL\"; fi\nif [ -z \"$BUILD_ARCH\" ] || [ \"$BUILD_ARCH\" = \"undefined_arch\" ]; then BUILD_ARCH=\"$(uname -m)\"; fi\ncase \"$BUILD_ARCH\" in\n  arm64) RUST_TARGET=aarch64-apple-darwin ;;\n  x86_64) RUST_TARGET=x86_64-apple-darwin ;;\n  *) echo \"Unsupported architecture: $BUILD_ARCH\"; exit 1 ;;\nesac\nNATIVE_DIR=\"$SRCROOT/native/typst-engine\"\ncargo build --manifest-path \"$NATIVE_DIR/Cargo.toml\" --release --target \"$RUST_TARGET\"\nmkdir -p \"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH\"\ncp \"$NATIVE_DIR/target/$RUST_TARGET/release/libtypst_editor_native.dylib\" \"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/libtypst_editor_native.dylib\"\nmkdir -p \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\ncp -f \"$SRCROOT/TypstEditor/Resources/AppIcon.icns\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/AppIcon.icns\"\ncp -f \"$SRCROOT/TypstEditor/Resources/logo.png\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/logo.png\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		DBGCONF = {

@@ -6,6 +6,10 @@ struct TypstEditorApp: App {
     @StateObject private var state = AppState()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    init() {
+        AppDelegate.applyAppIcon()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -39,6 +43,18 @@ struct TypstEditorApp: App {
 // Handles app lifecycle for save-on-quit and temp file cleanup
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
+
+    static func applyAppIcon() {
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") ??
+                         Bundle.main.url(forResource: "logo", withExtension: "png"),
+           let image = NSImage(contentsOf: iconURL) {
+            NSApplication.shared.applicationIconImage = image
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.applyAppIcon()
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         appState?.saveActive()

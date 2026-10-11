@@ -204,6 +204,7 @@ let typstCompletions: [Completion] = [
 struct TypstTextEditor: NSViewRepresentable {
     @Binding var text: String
     var onTextChange: (String) -> Void
+    var onCaretChange: ((Double) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -271,7 +272,22 @@ struct TypstTextEditor: NSViewRepresentable {
             // Highlight first (fast, synchronous)
             if let ts = tv.textStorage { applyHighlighting(to: ts) }
             parent.onTextChange(tv.string)
+            reportCaretPosition(in: tv)
             checkForCompletion(tv)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            reportCaretPosition(in: tv)
+        }
+
+        private func reportCaretPosition(in textView: NSTextView) {
+            let text = textView.string as NSString
+            let location = min(textView.selectedRange().location, text.length)
+            let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+            let line = (text.substring(to: lineRange.location) as NSString).components(separatedBy: "\n").count - 1
+            let lineCount = max(1, text.components(separatedBy: "\n").count)
+            parent.onCaretChange?(Double(line) / Double(lineCount))
         }
 
         func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {

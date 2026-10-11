@@ -76,19 +76,45 @@ struct TabItem: View {
 
 struct WelcomeView: View {
     @EnvironmentObject var state: AppState
+
+    private var appLogo: NSImage? {
+        if let url = Bundle.main.url(forResource: "logo", withExtension: "png") {
+            return NSImage(contentsOf: url)
+        }
+        return nil
+    }
+
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName:"doc.text.magnifyingglass").font(.system(size:44)).foregroundColor(.secondary)
-            Text("No file open").font(.title2)
-            Text("Open a project folder and pick a file from the sidebar,\nor open a file directly.")
-                .font(.system(size:13)).foregroundColor(.secondary).multilineTextAlignment(.center)
-            HStack(spacing:10) {
+            if let logo = appLogo {
+                Image(nsImage: logo)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 96, height: 96)
+            } else {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 44))
+                    .foregroundColor(.secondary)
+            }
+            VStack(spacing: 6) {
+                Text("TypstEditor")
+                    .font(.system(size: 22, weight: .bold))
+                Text("Fast, live typography & document preview")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            Text("Open a project folder and pick a file from the sidebar,\nor create a new document.")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 10) {
                 Button("Open Project…")  { state.openProject() }.buttonStyle(.borderedProminent)
                 Button("Open File…")     { state.openFilePanel() }.buttonStyle(.bordered)
                 Button("New .typ File…") { state.newFile() }.buttonStyle(.bordered)
             }
+            .padding(.top, 4)
         }
-        .frame(maxWidth:.infinity, maxHeight:.infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
     }
 }
@@ -109,7 +135,8 @@ struct TypEditorView: View {
                     Divider()
                     TypstTextEditor(
                         text: Binding(get: { state.activeSource }, set: { _ in }),
-                        onTextChange: { state.sourceDidChange($0) }
+                        onTextChange: { state.sourceDidChange($0) },
+                        onCaretChange: { state.sourcePositionDidChange($0) }
                     )
                     .frame(maxWidth:.infinity, maxHeight:.infinity)
                 }
@@ -194,7 +221,7 @@ struct TypEditorView: View {
 
             Button("Export PDF…") { state.exportPDF() }
                 .buttonStyle(.borderless).font(.system(size:11))
-                .disabled(state.lastExportURL == nil)
+                .disabled(state.lastExportData == nil)
         }
         .padding(.horizontal,12).padding(.vertical,6)
         .background(Color(NSColor.windowBackgroundColor))
@@ -202,27 +229,38 @@ struct TypEditorView: View {
 
     @ViewBuilder
     private var previewContent: some View {
-        if !state.errorMessage.isEmpty {
+        if let doc = state.pdfDocument {
+            VStack(spacing: 0) {
+                if !state.errorMessage.isEmpty {
+                    Text(state.errorMessage)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.red)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.06))
+                }
+                PDFPreview(document: doc,
+                           isCompiling: state.isCompiling,
+                           sourceProgress: state.sourceProgress)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        } else if !state.errorMessage.isEmpty {
             ScrollView {
                 Text(state.errorMessage)
                     .font(.system(size:12,design:.monospaced)).foregroundColor(.red)
                     .frame(maxWidth:.infinity, alignment:.leading).padding(12)
             }
             .frame(maxWidth:.infinity, maxHeight:.infinity).background(Color.red.opacity(0.05))
-        } else if let doc = state.pdfDocument {
-            PDFPreview(document: doc, compileCount: state.compileCount)
-                .frame(maxWidth:.infinity, maxHeight:.infinity)
         } else {
             Color(NSColor.windowBackgroundColor)
                 .frame(maxWidth:.infinity, maxHeight:.infinity)
                 .overlay(
                     VStack(spacing: 8) {
-                        if state.findTypst() == nil {
-                            Text("typst not found — brew install typst")
-                                .foregroundColor(.secondary).font(.system(size:13))
-                        } else if state.isCompiling {
+                        if state.isCompiling {
                             ProgressView().scaleEffect(0.8)
-                            Text("Starting…").foregroundColor(.secondary).font(.system(size:12))
+                            Text("Rendering preview…").foregroundColor(.secondary).font(.system(size:12))
                         } else {
                             Text("Open a .typ file to see a preview")
                                 .foregroundColor(.secondary).font(.system(size:13))
@@ -272,188 +310,316 @@ struct PlainTextEditorView: View {
 
 // MARK: - PDF Preview
 //
-// Uses a wrapper NSView that holds the PDFView as a child.  When a new document
-// arrives we:
-//   1. Snapshot the current PDFView pixels into a CALayer (freeze the screen).
-//   2. Swap the PDFDocument (PDFView goes blank internally for one frame).
-//   3. Wait one runloop pass for PDFView to finish layout.
-//   4. Restore scroll position.
-//   5. Fade the snapshot layer out — by the time it's gone PDFView is painted.
-// This completely hides the internal blank flash.
+// Continuous, smooth, flicker-free preview.
+// Pages are rendered directly to GPU-backed CALayer textures using background CoreGraphics,
+// eliminating PDFKit's document reload white-flash completely while keeping scrolling
+// and live updates instantaneous without flicker like the Typst web editor.
 
 struct PDFPreview: NSViewRepresentable {
     let document: PDFDocument
-    let compileCount: Int
+    let isCompiling: Bool
+    let sourceProgress: Double
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> FlickerFreePDFContainer {
-        let container = FlickerFreePDFContainer()
-        container.setDocument(document, animate: false)
+    func makeNSView(context: Context) -> SmoothPDFContainer {
+        let container = SmoothPDFContainer()
+        container.setDocument(document)
 
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.pageChanged(_:)),
-            name: .PDFViewPageChanged,
-            object: container.pdfView)
-
+        context.coordinator.container = container
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.handleJump(_:)),
             name: .jumpToPage,
-            object: nil)
-        context.coordinator.container = container
+            object: nil
+        )
         return container
     }
 
-    func updateNSView(_ container: FlickerFreePDFContainer, context: Context) {
-        guard container.pdfView.document !== document else { return }
-        container.setDocument(document, animate: true)
+    func updateNSView(_ container: SmoothPDFContainer, context: Context) {
+        if container.currentDocument !== document {
+            context.coordinator.lastSourceProgress = sourceProgress
+            container.setDocument(document)
+        } else if abs(context.coordinator.lastSourceProgress - sourceProgress) > 0.001 {
+            context.coordinator.lastSourceProgress = sourceProgress
+            container.scrollToSourceProgress(sourceProgress)
+        }
     }
 
     final class Coordinator: NSObject {
-        weak var container: FlickerFreePDFContainer?
-
-        @objc func pageChanged(_ note: Notification) {
-            guard let v = note.object as? PDFView,
-                  let page = v.currentPage,
-                  let doc = v.document else { return }
-            let idx = doc.index(for: page) + 1
-            NotificationCenter.default.post(name: .pdfPageChanged, object: idx)
-        }
+        weak var container: SmoothPDFContainer?
+        var lastSourceProgress: Double = -1
 
         @objc func handleJump(_ note: Notification) {
-            guard let page = note.object as? Int,
-                  let c = container,
-                  let doc = c.pdfView.document,
-                  let p = doc.page(at: page - 1) else { return }
-            DispatchQueue.main.async { c.pdfView.go(to: p) }
+            guard let page = note.object as? Int, let c = container else { return }
+            c.jumpToPage(page)
         }
     }
 }
 
-// MARK: - FlickerFreePDFContainer
+// MARK: - SmoothPDFContainer
 
-final class FlickerFreePDFContainer: NSView {
-    let pdfView = PDFView()
-    private var snapshotLayer: CALayer?
+final class SmoothPDFContainer: NSView {
+    private let scrollView = NSScrollView()
+    private let canvasView = FlippedCanvasView()
+    private(set) var pageViews: [SinglePageView] = []
+    private(set) var currentDocument: PDFDocument?
+    private var renderGeneration = 0
+    private let renderQueue = DispatchQueue(label: "com.typsteditor.previewrender", qos: .userInteractive)
+    private var lastReportedPage = 1
+    private var currentDisplayScale: CGFloat = 1.0
+
+    private let pageSpacing: CGFloat = 18
+    private let horizontalMargin: CGFloat = 20
+    private let verticalMargin: CGFloat = 20
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
         wantsLayer = true
-        pdfView.autoScales = true
-        pdfView.displayMode = .singlePageContinuous
-        pdfView.displayDirection = .vertical
-        pdfView.backgroundColor = .white
-        pdfView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(pdfView)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(name: nil, dynamicProvider: { app in
+            app.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(red: 0.12, green: 0.13, blue: 0.15, alpha: 1.0)
+                : NSColor(red: 0.92, green: 0.93, blue: 0.95, alpha: 1.0)
+        })
+
+        canvasView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = canvasView
+        addSubview(scrollView)
+
         NSLayoutConstraint.activate([
-            pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pdfView.topAnchor.constraint(equalTo: topAnchor),
-            pdfView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-    }
-    required init?(coder: NSCoder) { fatalError() }
 
-    func setDocument(_ doc: PDFDocument, animate: Bool) {
-        if animate {
-            swapWithSnapshot(doc)
-        } else {
-            pdfView.document = doc
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleScrollNotification(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func layout() {
+        super.layout()
+        layoutPages()
+    }
+
+    func setDocument(_ doc: PDFDocument) {
+        guard currentDocument !== doc else { return }
+        currentDocument = doc
+        renderGeneration += 1
+        let generation = renderGeneration
+        let count = doc.pageCount
+
+        // Synchronize page view count without removing existing views to avoid flicker
+        while pageViews.count < count {
+            let pv = SinglePageView()
+            canvasView.addSubview(pv)
+            pageViews.append(pv)
+        }
+        while pageViews.count > count {
+            let last = pageViews.removeLast()
+            last.removeFromSuperview()
+        }
+
+        layoutPages()
+        renderPages(doc: doc, generation: generation)
+    }
+
+    private func layoutPages() {
+        guard let doc = currentDocument, doc.pageCount > 0 else {
+            canvasView.frame = bounds
+            return
+        }
+
+        let viewportWidth = scrollView.contentSize.width
+        guard viewportWidth > 0 else { return }
+        let availableWidth = max(100, viewportWidth - horizontalMargin * 2)
+
+        let firstPageBox = doc.page(at: 0)?.bounds(for: .mediaBox) ?? CGRect(x: 0, y: 0, width: 595, height: 842)
+        let fitScale = availableWidth / max(1, firstPageBox.width)
+        let scaleChanged = abs(currentDisplayScale - fitScale) > 0.05
+        currentDisplayScale = fitScale
+
+        var currentY: CGFloat = verticalMargin
+        for (i, pv) in pageViews.enumerated() {
+            guard let page = doc.page(at: i) else { continue }
+            let box = page.bounds(for: .mediaBox)
+            let w = box.width * fitScale
+            let h = box.height * fitScale
+            let x = max(horizontalMargin, (viewportWidth - w) / 2)
+            pv.frame = NSRect(x: round(x), y: round(currentY), width: round(w), height: round(h))
+            currentY += h + pageSpacing
+        }
+
+        let totalHeight = currentY - pageSpacing + verticalMargin
+        let viewportHeight = scrollView.contentSize.height
+        canvasView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: viewportWidth,
+            height: max(viewportHeight, totalHeight)
+        )
+
+        if scaleChanged {
+            renderPages(doc: doc, generation: renderGeneration)
         }
     }
 
-    private func swapWithSnapshot(_ newDoc: PDFDocument) {
-        // 1. Capture the current pixels
-        let snapshot = makeSnapshot()
+    private func renderPages(doc: PDFDocument, generation: Int) {
+        let count = doc.pageCount
+        let scaleFactor = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let displayScale = currentDisplayScale
 
-        // 2. Save scroll position
-        let scrollInfo = captureScrollPosition()
-
-        // 3. Swap the document — PDFView blanks internally here
-        pdfView.document = newDoc
-
-        // 4. Immediately overlay the snapshot so the user sees no blank
-        if let snap = snapshot {
-            snap.frame = bounds
-            snap.zPosition = 1000
-            layer?.addSublayer(snap)
-            snapshotLayer = snap
-        }
-
-        // 5. Give PDFView one runloop pass to layout, then restore scroll
-        //    and fade the snapshot out
-        DispatchQueue.main.async { [weak self] in
+        renderQueue.async { [weak self] in
             guard let self else { return }
-            self.restoreScrollPosition(scrollInfo, in: newDoc)
+            for index in 0..<count {
+                guard self.renderGeneration == generation else { return }
+                guard let page = doc.page(at: index) else { continue }
 
-            // Short delay so PDFView finishes painting before we remove cover
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self, let snap = self.snapshotLayer else { return }
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(0.08)
-                CATransaction.setCompletionBlock { snap.removeFromSuperlayer() }
-                snap.opacity = 0
-                CATransaction.commit()
-                self.snapshotLayer = nil
+                let mediaBox = page.bounds(for: .mediaBox)
+                let pixelWidth = Int(ceil(mediaBox.width * displayScale * scaleFactor))
+                let pixelHeight = Int(ceil(mediaBox.height * displayScale * scaleFactor))
+                guard pixelWidth > 0, pixelHeight > 0 else { continue }
+
+                let colorSpace = CGColorSpaceCreateDeviceRGB()
+                guard let ctx = CGContext(
+                    data: nil,
+                    width: pixelWidth,
+                    height: pixelHeight,
+                    bitsPerComponent: 8,
+                    bytesPerRow: 0,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                ) else { continue }
+
+                ctx.interpolationQuality = .high
+                ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+
+                let renderScale = CGFloat(pixelWidth) / mediaBox.width
+                ctx.scaleBy(x: renderScale, y: renderScale)
+                page.draw(with: .mediaBox, to: ctx)
+
+                guard let cgImage = ctx.makeImage() else { continue }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.renderGeneration == generation else { return }
+                    if index < self.pageViews.count {
+                        self.pageViews[index].setImage(cgImage)
+                    }
+                }
             }
         }
     }
 
-    private func makeSnapshot() -> CALayer? {
-        guard let contentLayer = pdfView.layer else { return nil }
-        let snap = CALayer()
-        snap.contents = contentLayer.contents
-        // Walk subviews to find the scroll content and render it
-        if let bitmapRep = pdfView.bitmapImageRepForCachingDisplay(in: pdfView.bounds) {
-            pdfView.cacheDisplay(in: pdfView.bounds, to: bitmapRep)
-            if let cgImage = bitmapRep.cgImage {
-                let imageLayer = CALayer()
-                imageLayer.frame = bounds
-                imageLayer.contents = cgImage
-                imageLayer.contentsGravity = .resize
-                return imageLayer
+    @objc private func handleScrollNotification(_ note: Notification) {
+        guard let doc = currentDocument, doc.pageCount > 0 else { return }
+        let visibleMidY = scrollView.contentView.bounds.midY
+        var activeIndex = 0
+        for (i, pv) in pageViews.enumerated() {
+            if pv.frame.minY <= visibleMidY && pv.frame.maxY >= visibleMidY {
+                activeIndex = i
+                break
+            } else if pv.frame.minY > visibleMidY {
+                activeIndex = max(0, i - 1)
+                break
             }
+            activeIndex = i
         }
-        return nil
+        let pageNum = activeIndex + 1
+        if pageNum != lastReportedPage {
+            lastReportedPage = pageNum
+            NotificationCenter.default.post(name: .pdfPageChanged, object: pageNum)
+        }
     }
 
-    private struct ScrollInfo {
-        let pageIndex: Int?
-        let pageOffset: CGFloat
-        let fraction: CGFloat
+    func jumpToPage(_ page: Int) {
+        let index = max(0, min(page - 1, pageViews.count - 1))
+        guard pageViews.indices.contains(index) else { return }
+        let targetY = max(0, pageViews[index].frame.minY - verticalMargin)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
-    private func captureScrollPosition() -> ScrollInfo {
-        let sv = pdfView.documentView?.enclosingScrollView
-        let dv = pdfView.documentView
-        var fraction: CGFloat = 0
-        if let dv, dv.bounds.height > 0 {
-            let vis = sv?.documentVisibleRect ?? dv.visibleRect
-            fraction = vis.minY / dv.bounds.height
-        }
-        let pageIndex = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
-        var pageOffset: CGFloat = 0
-        if let page = pdfView.currentPage, let dv {
-            let pageRect = pdfView.convert(page.bounds(for: pdfView.displayBox), from: page)
-            let visMin   = sv?.documentVisibleRect.minY ?? dv.visibleRect.minY
-            pageOffset   = visMin - pageRect.minY
-        }
-        return ScrollInfo(pageIndex: pageIndex, pageOffset: pageOffset, fraction: fraction)
+    func scrollToSourceProgress(_ progress: Double) {
+        let maxY = max(0, canvasView.bounds.height - scrollView.contentSize.height)
+        guard maxY > 0 else { return }
+        let targetY = maxY * min(max(progress, 0), 1)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+}
+
+// MARK: - Canvas and Page Views
+
+private final class FlippedCanvasView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+final class SinglePageView: NSView {
+    private let contentLayer = CALayer()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setupView()
     }
 
-    private func restoreScrollPosition(_ info: ScrollInfo, in doc: PDFDocument) {
-        guard let dv = pdfView.documentView else { return }
-        let sv = dv.enclosingScrollView
-        if let idx = info.pageIndex, let newPage = doc.page(at: idx) {
-            let pageRect = pdfView.convert(newPage.bounds(for: pdfView.displayBox), from: newPage)
-            let targetY  = pageRect.minY + info.pageOffset
-            let maxY     = dv.bounds.height - (sv?.contentSize.height ?? 0)
-            dv.scroll(NSPoint(x: 0, y: max(0, min(targetY, maxY))))
-        } else {
-            dv.scroll(NSPoint(x: 0, y: info.fraction * dv.bounds.height))
-        }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.cgColor
+        layer?.cornerRadius = 2
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.22
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = CGSize(width: 0, height: -2)
+
+        contentLayer.contentsGravity = .resizeAspect
+        contentLayer.masksToBounds = true
+        layer?.addSublayer(contentLayer)
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    func setImage(_ image: CGImage) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentLayer.contents = image
+        CATransaction.commit()
     }
 }
 

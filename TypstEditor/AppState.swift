@@ -41,7 +41,7 @@ final class AppState: ObservableObject {
     private var savedContents: [URL: String]      = [:]
     // Per-tab PDF cache — keeps the last good rendered PDF for each open file
     private var tabPDFs:       [URL: PDFDocument] = [:]
-    private var tabExportURLs: [URL: URL]         = [:]
+    private var tabExportData: [URL: Data]        = [:]
 
     var activeTab: EditorTab? { tabs.first { $0.id == activeTabID } }
     var activeURL: URL?       { activeTab?.url }
@@ -63,6 +63,7 @@ final class AppState: ObservableObject {
     // Compile / preview
     @Published var pdfDocument: PDFDocument? = nil
     @Published var lastExportURL: URL?       = nil
+    @Published var lastExportData: Data?     = nil
     @Published var errorMessage: String      = ""
     @Published var isCompiling: Bool         = false
     @Published var compileCount: Int         = 0
@@ -70,14 +71,17 @@ final class AppState: ObservableObject {
     // Page tracking for the preview toolbar
     @Published var currentPage: Int  = 1
     @Published var totalPages: Int   = 1
+    @Published var sourceProgress: Double = 0
 
-    // Watch-mode state
-    private var watchProcess: Process?
-    private var watchSrcURL: URL?          // stable temp .typ file fed to typst watch
-    private var watchOutURL: URL?          // stable .pdf output
-    private var watchTimer: Timer?         // debounce writes (50 ms)
-    private var outputPoller: Timer?       // poll for new PDF (100 ms)
-    private var lastPDFModDate: Date?      // detect when typst rewrites the PDF
+    // A persistent in-process Typst compiler runs away from the UI thread.
+    private let compileQueue = DispatchQueue(label: "com.typsteditor.compiler", qos: .userInitiated)
+    private var compileTimer: Timer?
+    private var compileGeneration = 0
+    private let generationLock = NSLock()
+    private var latestRequestedGeneration = 0
+    private var nativeCompiler: TypstNativeCompiler?
+    private var nativeCompilerRoot: URL?
+    private var previewSources: [URL: URL] = [:]
 
     // MARK: - Project
 
@@ -123,7 +127,8 @@ final class AppState: ObservableObject {
     func openURL(_ url: URL) {
         if let existing = tabs.first(where: { $0.url == url }) {
             activeTabID = existing.id
-            switchWatchToActive()
+            sourceProgress = 0
+            switchCompilerToActive()
             return
         }
         saveActive()
@@ -133,8 +138,9 @@ final class AppState: ObservableObject {
         savedContents[url] = text
         tabs.append(tab)
         activeTabID = tab.id
+        sourceProgress = 0
         clearPDF()  // fresh tab — no cached PDF yet, blank is correct
-        if url.pathExtension == "typ" { startWatch() }
+        if url.pathExtension == "typ" { scheduleCompile() }
     }
 
     func openFilePanel() {
@@ -160,28 +166,33 @@ final class AppState: ObservableObject {
     func selectTab(_ tab: EditorTab) {
         saveActive()
         activeTabID = tab.id
+        sourceProgress = 0
         // Restore the last good PDF for this tab (don't blank out)
         restoreCachedPDF(for: tab.url)
-        if tab.isTyp { switchWatchToActive() }
+        switchCompilerToActive()
     }
 
     func closeTab(_ tab: EditorTab) {
         saveContentForTab(tab)
+        if let previewURL = previewSources[tab.url] {
+            try? FileManager.default.removeItem(at: previewURL)
+            previewSources.removeValue(forKey: tab.url)
+        }
         guard let idx = tabs.firstIndex(of: tab) else { return }
         tabs.remove(at: idx)
         tabContents.removeValue(forKey: tab.url)
         savedContents.removeValue(forKey: tab.url)
         tabPDFs.removeValue(forKey: tab.url)
-        tabExportURLs.removeValue(forKey: tab.url)
+        tabExportData.removeValue(forKey: tab.url)
         if tabs.isEmpty {
             activeTabID = nil
-            stopWatch()
+            stopCompiler()
             clearPDF()
         } else {
             let newIdx = min(idx, tabs.count - 1)
             activeTabID = tabs[newIdx].id
             restoreCachedPDF(for: tabs[newIdx].url)
-            if tabs[newIdx].isTyp { switchWatchToActive() }
+            switchCompilerToActive()
         }
     }
 
@@ -215,141 +226,141 @@ final class AppState: ObservableObject {
         refreshTree()
     }
 
-    // MARK: - Source change  (called on every keystroke — no debounce here)
+    // MARK: - Source change
 
     func sourceDidChange(_ newValue: String) {
         activeSource = newValue
-        if activeIsTyp { scheduleWatchWrite() }
+        if activeIsTyp { scheduleCompile() }
     }
 
-    // MARK: - Watch mode
-    //
-    // Instead of spawning a new `typst compile` on every edit (expensive),
-    // we spawn ONE `typst watch` process that stays alive and re-renders
-    // whenever its input file changes on disk.  We write the current source
-    // to the stable watch-src file on a 50 ms debounce, then poll the output
-    // PDF's mtime at 100 ms to detect when typst has finished re-rendering.
+    func sourcePositionDidChange(_ progress: Double) {
+        sourceProgress = min(max(progress, 0), 1)
+    }
 
-    private func startWatch() {
-        stopWatch()
-        guard let typst = findTypst(), let url = activeURL else { return }
+    // MARK: - In-process Typst preview
 
-        let srcDir = url.deletingLastPathComponent()
-        let root   = projectURL ?? srcDir
+    private func switchCompilerToActive() {
+        guard activeIsTyp else {
+            compileTimer?.invalidate()
+            compileTimer = nil
+            compileGeneration += 1
+            isCompiling = false
+            return
+        }
+        scheduleCompile()
+    }
 
-        // watchSrc MUST live inside --root so typst doesn't reject it.
-        // We put it next to the real file with a hidden-ish name.
-        let safeBase = url.deletingPathExtension().lastPathComponent
-            .replacingOccurrences(of: "/", with: "_")
-        let watchSrc = srcDir.appendingPathComponent(".__watch_\(safeBase).typ")
+    private func scheduleCompile() {
+        compileGeneration += 1
+        let generation = compileGeneration
+        generationLock.lock()
+        latestRequestedGeneration = generation
+        generationLock.unlock()
 
-        // watchOut can live anywhere — tmp is fine for the PDF output
-        let tmp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("typsteditor", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        let watchOut = tmp.appendingPathComponent("watch_\(safeBase).pdf")
+        compileTimer?.invalidate()
+        isCompiling = true
+        let timer = Timer(timeInterval: 0.03, repeats: false) { [weak self] _ in
+            self?.compileActiveSource(generation: generation)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        compileTimer = timer
+    }
 
-        watchSrcURL = watchSrc
-        watchOutURL = watchOut
+    private func compileActiveSource(generation: Int) {
+        guard let url = activeURL, activeIsTyp else { return }
+        let source = activeSource
+        let root = compilerRoot(for: url)
+        let sourceDirectory = url.deletingLastPathComponent()
+            .resolvingSymlinksInPath().standardizedFileURL
+        let sourceURL = previewSources[url] ?? sourceDirectory
+            .appendingPathComponent(".__typsteditor_preview_\(UUID().uuidString).typ")
+        previewSources[url] = sourceURL
 
-        // Write current source immediately so typst has something to compile
-        try? activeSource.write(to: watchSrc, atomically: false, encoding: .utf8)
+        do {
+            try source.write(to: sourceURL, atomically: false, encoding: .utf8)
+        } catch {
+            errorMessage = "Could not prepare Typst preview: \(error.localizedDescription)"
+            isCompiling = false
+            return
+        }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: typst)
-        proc.arguments = ["watch", "--root", root.path, watchSrc.path, watchOut.path]
+        let normalizedRootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let normalizedSourcePath = sourceURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPrefix = normalizedRootPath.hasSuffix("/") ? normalizedRootPath : normalizedRootPath + "/"
+        guard normalizedSourcePath.hasPrefix(rootPrefix) else {
+            errorMessage = "Could not map preview source into the Typst project root."
+            isCompiling = false
+            return
+        }
+        let relativePath = String(normalizedSourcePath.dropFirst(rootPrefix.count))
+            .replacingOccurrences(of: "\\", with: "/")
+        let typstPath = "/" + relativePath
 
-        let errPipe = Pipe()
-        proc.standardError  = errPipe
-        proc.standardOutput = Pipe()
+        compileQueue.async { [weak self] in
+            guard let self else { return }
+            self.generationLock.lock()
+            let isLatest = (self.latestRequestedGeneration == generation)
+            self.generationLock.unlock()
+            guard isLatest else { return }
 
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty,
-                  let text = String(data: data, encoding: .utf8),
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            DispatchQueue.main.async {
-                let lines = text.components(separatedBy: .newlines)
-                    .filter { !$0.hasPrefix("watching") && !$0.hasPrefix("Watching") && !$0.isEmpty }
-                guard !lines.isEmpty else { return }
-                let joined = lines.joined(separator: "\n")
-                if joined.lowercased().contains("error") {
-                    self?.errorMessage = joined
-                        .replacingOccurrences(of: watchSrc.path, with: url.path)
-                } else {
-                    self?.errorMessage = ""
+            do {
+                if self.nativeCompilerRoot != root || self.nativeCompiler == nil {
+                    self.nativeCompiler = try TypstNativeCompiler(rootURL: root)
+                    self.nativeCompilerRoot = root
+                }
+                guard let compiler = self.nativeCompiler else {
+                    throw TypstNativeCompiler.CompilerError("The in-app Typst engine is unavailable.")
+                }
+                let pdf = try compiler.compile(sourcePath: typstPath)
+                DispatchQueue.main.async {
+                    guard self.compileGeneration == generation, self.activeURL == url else { return }
+                    guard let document = PDFDocument(data: pdf), document.pageCount > 0 else {
+                        self.errorMessage = "Typst returned an invalid PDF preview."
+                        self.isCompiling = false
+                        return
+                    }
+                    self.tabPDFs[url] = document
+                    self.tabExportData[url] = pdf
+                    self.pdfDocument = document
+                    self.lastExportURL = nil
+                    self.lastExportData = pdf
+                    self.compileCount += 1
+                    self.errorMessage = ""
+                    self.isCompiling = false
+                    self.totalPages = document.pageCount
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.compileGeneration == generation, self.activeURL == url else { return }
+                    self.errorMessage = error.localizedDescription
+                    self.isCompiling = false
                 }
             }
         }
+    }
 
-        try? proc.run()
-        watchProcess = proc
-        isCompiling  = true
-
-        lastPDFModDate = nil
-        outputPoller = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.pollPDFOutput()
+    private func compilerRoot(for sourceURL: URL) -> URL {
+        let resolvedSource = sourceURL.resolvingSymlinksInPath().standardizedFileURL
+        let sourcePath = resolvedSource.path
+        if let project = projectURL?.resolvingSymlinksInPath().standardizedFileURL,
+           sourcePath.hasPrefix(project.path + "/") {
+            return project
         }
+        return resolvedSource.deletingLastPathComponent().standardizedFileURL
     }
 
-    private func switchWatchToActive() {
-        // Reuse the existing watch process — just rewrite the src file
-        guard activeIsTyp else { stopWatch(); return }
-        if watchProcess?.isRunning == true {
-            scheduleWatchWrite()
-        } else {
-            startWatch()
+    private func stopCompiler() {
+        compileGeneration += 1
+        compileTimer?.invalidate()
+        compileTimer = nil
+        isCompiling = false
+        let files = Array(previewSources.values)
+        previewSources.removeAll()
+        compileQueue.async { [weak self] in
+            self?.nativeCompiler = nil
+            self?.nativeCompilerRoot = nil
+            files.forEach { try? FileManager.default.removeItem(at: $0) }
         }
-    }
-
-    func stopWatch() {
-        watchTimer?.invalidate();   watchTimer   = nil
-        outputPoller?.invalidate(); outputPoller = nil
-        watchProcess?.terminate();  watchProcess = nil
-        // Delete the temp source file we placed next to the user's real file
-        if let src = watchSrcURL { try? FileManager.default.removeItem(at: src) }
-        watchSrcURL    = nil
-        watchOutURL    = nil
-        lastPDFModDate = nil
-    }
-
-    private func scheduleWatchWrite() {
-        // 50 ms debounce — fast enough to feel instant, avoids hammering disk
-        watchTimer?.invalidate()
-        watchTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
-            self?.writeWatchSrc()
-        }
-    }
-
-    private func writeWatchSrc() {
-        guard let src = watchSrcURL else { return }
-        let snapshot = activeSource
-        try? snapshot.write(to: src, atomically: false, encoding: .utf8)
-        // atomically:false is intentional — atomic writes use a rename which
-        // some watchers miss; direct write modifies the inode typst is watching
-    }
-
-    private func pollPDFOutput() {
-        guard let outURL = watchOutURL else { return }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: outURL.path)
-        let modDate = attrs?[.modificationDate] as? Date
-        guard let mod = modDate, mod != lastPDFModDate else { return }
-        lastPDFModDate = mod
-
-        // New PDF written — load it
-        guard let doc = PDFDocument(url: outURL) else { return }
-        // Cache for this tab so switching back shows the last good render
-        if let url = activeURL {
-            tabPDFs[url]      = doc
-            tabExportURLs[url] = outURL
-        }
-        // Swap directly — no nil flash between old and new
-        pdfDocument   = doc
-        lastExportURL = outURL
-        compileCount += 1
-        errorMessage  = ""
-        isCompiling   = false
-        totalPages    = doc.pageCount
     }
 
     // MARK: - Page navigation
@@ -365,23 +376,18 @@ final class AppState: ObservableObject {
     // MARK: - Export
 
     func exportPDF() {
-        guard let src = lastExportURL else { return }
+        guard let data = lastExportData else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue =
             (activeURL?.deletingPathExtension().lastPathComponent ?? "document") + ".pdf"
         panel.allowedContentTypes = [.pdf]
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        try? FileManager.default.copyItem(at: src, to: dest)
-    }
-
-    func findTypst() -> String? {
-        ["/usr/local/bin/typst", "/opt/homebrew/bin/typst", "/usr/bin/typst",
-         "\(NSHomeDirectory())/.cargo/bin/typst"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) }
+        try? data.write(to: dest, options: .atomic)
     }
 
     func cleanupTempDirectory() {
-        stopWatch()
+        stopCompiler()
+        compileQueue.sync {}
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("typsteditor", isDirectory: true)
         try? FileManager.default.removeItem(at: tmp)
@@ -391,6 +397,7 @@ final class AppState: ObservableObject {
         pdfDocument   = nil
         errorMessage  = ""
         lastExportURL = nil
+        lastExportData = nil
         totalPages    = 0
         currentPage   = 1
     }
@@ -398,7 +405,8 @@ final class AppState: ObservableObject {
     private func restoreCachedPDF(for url: URL) {
         if let cached = tabPDFs[url] {
             pdfDocument   = cached
-            lastExportURL = tabExportURLs[url]
+            lastExportURL = nil
+            lastExportData = tabExportData[url]
             totalPages    = cached.pageCount
             errorMessage  = ""
         } else {
