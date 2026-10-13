@@ -135,6 +135,7 @@ struct TypEditorView: View {
                     Divider()
                     TypstTextEditor(
                         text: Binding(get: { state.activeSource }, set: { _ in }),
+                        totalPages: state.totalPages,
                         onTextChange: { state.sourceDidChange($0) },
                         onCaretChange: { state.sourcePositionDidChange($0) }
                     )
@@ -178,16 +179,33 @@ struct TypEditorView: View {
         .background(Color(NSColor.windowBackgroundColor))
     }
 
+    private var zoomTitle: String {
+        switch state.zoomMode {
+        case .fitWidth:
+            return "Fit Width"
+        case .fitPage:
+            return "Fit Page"
+        case .custom:
+            return "\(Int(round(state.zoomScale * 100)))%"
+        }
+    }
+
     @ViewBuilder
     private func previewToolbar(pageInput: Binding<String>) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             // Status icon
             if state.isCompiling {
                 ProgressView().controlSize(.small)
             } else if !state.errorMessage.isEmpty {
-                Image(systemName:"exclamationmark.triangle.fill").foregroundColor(.orange).font(.system(size:11))
+                Image(systemName:"exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size:11))
+                    .help("Compilation has issues")
             } else if state.pdfDocument != nil {
-                Image(systemName:"checkmark.circle.fill").foregroundColor(.green).font(.system(size:11))
+                Image(systemName:"checkmark.circle.fill")
+                    .foregroundColor(.green)
+                    .font(.system(size:11))
+                    .help("Document up to date")
             }
 
             Spacer()
@@ -198,7 +216,9 @@ struct TypEditorView: View {
                     Button(action: { jumpPage(by: -1, current: pageInput.wrappedValue) }) {
                         Image(systemName:"chevron.left").font(.system(size:10,weight:.medium))
                     }
-                    .buttonStyle(.borderless).disabled(state.currentPage <= 1)
+                    .buttonStyle(.borderless)
+                    .disabled(state.currentPage <= 1)
+                    .help("Previous Page (⌘[)")
 
                     TextField("", text: pageInput)
                         .multilineTextAlignment(.center)
@@ -213,18 +233,84 @@ struct TypEditorView: View {
                     Button(action: { jumpPage(by: 1, current: pageInput.wrappedValue) }) {
                         Image(systemName:"chevron.right").font(.system(size:10,weight:.medium))
                     }
-                    .buttonStyle(.borderless).disabled(state.currentPage >= state.totalPages)
+                    .buttonStyle(.borderless)
+                    .disabled(state.currentPage >= state.totalPages)
+                    .help("Next Page (⌘])")
                 }
             }
 
             Spacer()
 
-            Button("Export PDF…") { state.exportPDF() }
-                .buttonStyle(.borderless).font(.system(size:11))
-                .disabled(state.lastExportData == nil)
+            // Zoom controls
+            HStack(spacing: 2) {
+                Button(action: { state.zoomOut() }) {
+                    Image(systemName: "minus.magnifyingglass")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Zoom Out (⌘-)")
+
+                Menu {
+                    Button("Fit Width") { state.zoomFitWidth() }
+                    Button("Fit Page")  { state.zoomFitPage() }
+                    Divider()
+                    Button("50%")  { state.zoomSetPercentage(50) }
+                    Button("75%")  { state.zoomSetPercentage(75) }
+                    Button("100%") { state.zoomSetPercentage(100) }
+                    Button("125%") { state.zoomSetPercentage(125) }
+                    Button("150%") { state.zoomSetPercentage(150) }
+                    Button("200%") { state.zoomSetPercentage(200) }
+                } label: {
+                    Text(zoomTitle)
+                        .font(.system(size: 11))
+                        .frame(minWidth: 54)
+                }
+                .menuStyle(.borderlessButton)
+
+                Button(action: { state.zoomIn() }) {
+                    Image(systemName: "plus.magnifyingglass")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Zoom In (⌘+)")
+            }
+
+            Divider().frame(height: 14)
+
+            // Export Menu
+            Menu {
+                Button(action: { state.exportPDF() }) {
+                    Label("Export PDF…", systemImage: "doc.richtext")
+                }
+                Button(action: { state.exportPNG() }) {
+                    Label("Export High-Res PNG (3×)…", systemImage: "photo")
+                }
+                Button(action: { state.exportSVG() }) {
+                    Label("Export Vector SVG…", systemImage: "square.stack.3d.up")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 11))
+                    Text("Export")
+                        .font(.system(size: 11, weight: .medium))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(state.lastExportData == nil)
         }
         .padding(.horizontal,12).padding(.vertical,6)
         .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private func cleanErrorMessage(_ message: String) -> String {
+        var text = message
+        if let regex = try? NSRegularExpression(pattern: #"([^\s:]+\.__typsteditor_preview_[A-Za-z0-9\-]+\.typ:\d+:\d+:\s*)"#) {
+            text = regex.stringByReplacingMatches(in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "")
+        } else if let regex = try? NSRegularExpression(pattern: #"([^\s:]+\.__typsteditor_preview_[A-Za-z0-9\-]+\.typ:\s*)"#) {
+            text = regex.stringByReplacingMatches(in: text, options: [], range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @ViewBuilder
@@ -232,27 +318,78 @@ struct TypEditorView: View {
         if let doc = state.pdfDocument {
             VStack(spacing: 0) {
                 if !state.errorMessage.isEmpty {
-                    Text(state.errorMessage)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.red)
-                        .lineLimit(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color.red.opacity(0.06))
+                    HStack(alignment: .center, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                        Text(cleanErrorMessage(state.errorMessage))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .lineLimit(2)
+                        Spacer()
+                        if let line = state.errorLine {
+                            Button(action: { state.jumpToError() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.right.circle.fill")
+                                        .font(.system(size: 10))
+                                    Text("Line \(line)\(state.errorColumn.map { ":\($0)" } ?? "")")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .controlSize(.mini)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.12))
+                    .overlay(Rectangle().frame(height: 0.5).foregroundColor(Color.orange.opacity(0.4)), alignment: .bottom)
                 }
                 PDFPreview(document: doc,
                            isCompiling: state.isCompiling,
-                           sourceProgress: state.sourceProgress)
+                           sourceProgress: state.sourceProgress,
+                           zoomMode: state.zoomMode)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else if !state.errorMessage.isEmpty {
-            ScrollView {
-                Text(state.errorMessage)
-                    .font(.system(size:12,design:.monospaced)).foregroundColor(.red)
-                    .frame(maxWidth:.infinity, alignment:.leading).padding(12)
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundColor(.red)
+                        .font(.system(size: 14))
+                    Text("Compilation Failed")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.red)
+                    Spacer()
+                    if let line = state.errorLine {
+                        Button(action: { state.jumpToError() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.right.circle.fill")
+                                    .font(.system(size: 10))
+                                Text("Jump to Line \(line)\(state.errorColumn.map { ":\($0)" } ?? "")")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.red.opacity(0.12))
+                Divider()
+                ScrollView {
+                    Text(cleanErrorMessage(state.errorMessage))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                }
             }
-            .frame(maxWidth:.infinity, maxHeight:.infinity).background(Color.red.opacity(0.05))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(NSColor.windowBackgroundColor))
         } else {
             Color(NSColor.windowBackgroundColor)
                 .frame(maxWidth:.infinity, maxHeight:.infinity)
@@ -319,11 +456,13 @@ struct PDFPreview: NSViewRepresentable {
     let document: PDFDocument
     let isCompiling: Bool
     let sourceProgress: Double
+    let zoomMode: ZoomMode
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> SmoothPDFContainer {
         let container = SmoothPDFContainer()
+        container.setZoomMode(zoomMode)
         container.setDocument(document)
 
         context.coordinator.container = container
@@ -337,6 +476,9 @@ struct PDFPreview: NSViewRepresentable {
     }
 
     func updateNSView(_ container: SmoothPDFContainer, context: Context) {
+        if container.zoomMode != zoomMode {
+            container.setZoomMode(zoomMode)
+        }
         if container.currentDocument !== document {
             context.coordinator.lastSourceProgress = sourceProgress
             container.setDocument(document)
@@ -367,7 +509,9 @@ final class SmoothPDFContainer: NSView {
     private var renderGeneration = 0
     private let renderQueue = DispatchQueue(label: "com.typsteditor.previewrender", qos: .userInteractive)
     private var lastReportedPage = 1
-    private var currentDisplayScale: CGFloat = 1.0
+    private(set) var currentDisplayScale: CGFloat = 1.0
+    private(set) var zoomMode: ZoomMode = .fitWidth
+    private var initialPinchScale: CGFloat = 1.0
 
     private let pageSpacing: CGFloat = 18
     private let horizontalMargin: CGFloat = 20
@@ -387,7 +531,7 @@ final class SmoothPDFContainer: NSView {
         wantsLayer = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
+        scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = NSColor(name: nil, dynamicProvider: { app in
@@ -414,6 +558,18 @@ final class SmoothPDFContainer: NSView {
             name: NSView.boundsDidChangeNotification,
             object: scrollView.contentView
         )
+
+        // Trackpad pinch-to-zoom
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnification(_:)))
+        pinch.delaysPrimaryMouseButtonEvents = false
+        scrollView.addGestureRecognizer(pinch)
+
+        // Zoom shortcuts and toolbar notifications
+        NotificationCenter.default.addObserver(self, selector: #selector(handleZoomInNote), name: .zoomIn, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleZoomOutNote), name: .zoomOut, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleZoomFitWidthNote), name: .zoomReset, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleZoomFitPageNote), name: .zoomFitPage, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleZoomSetPercentageNote(_:)), name: .zoomSetPercentage, object: nil)
     }
 
     deinit {
@@ -423,6 +579,70 @@ final class SmoothPDFContainer: NSView {
     override func layout() {
         super.layout()
         layoutPages()
+    }
+
+    func setZoomMode(_ mode: ZoomMode) {
+        guard zoomMode != mode else { return }
+        zoomMode = mode
+        layoutPages()
+    }
+
+    @objc private func handleZoomInNote() {
+        let presets: [CGFloat] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+        let cur = currentDisplayScale
+        let next = presets.first { $0 > cur + 0.05 } ?? min(cur * 1.25, 4.0)
+        zoomMode = .custom(next)
+        layoutPages()
+    }
+
+    @objc private func handleZoomOutNote() {
+        let presets: [CGFloat] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0].reversed()
+        let cur = currentDisplayScale
+        let prev = presets.first { $0 < cur - 0.05 } ?? max(cur * 0.8, 0.25)
+        zoomMode = .custom(prev)
+        layoutPages()
+    }
+
+    @objc private func handleZoomFitWidthNote() {
+        zoomMode = .fitWidth
+        layoutPages()
+    }
+
+    @objc private func handleZoomFitPageNote() {
+        zoomMode = .fitPage
+        layoutPages()
+    }
+
+    @objc private func handleZoomSetPercentageNote(_ note: Notification) {
+        guard let percent = note.object as? Int else { return }
+        zoomMode = .custom(CGFloat(percent) / 100.0)
+        layoutPages()
+    }
+
+    @objc private func handleMagnification(_ gesture: NSMagnificationGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            initialPinchScale = currentDisplayScale
+        case .changed:
+            let newScale = max(0.25, min(4.0, initialPinchScale * (1.0 + gesture.magnification)))
+            zoomMode = .custom(newScale)
+            currentDisplayScale = newScale
+            layoutPagesFast()
+            notifyZoomChanged()
+        case .ended, .cancelled:
+            if let doc = currentDocument {
+                renderPages(doc: doc, generation: renderGeneration)
+            }
+        default:
+            break
+        }
+    }
+
+    private func notifyZoomChanged() {
+        NotificationCenter.default.post(
+            name: .previewZoomChanged,
+            object: (scale: currentDisplayScale, mode: zoomMode)
+        )
     }
 
     func setDocument(_ doc: PDFDocument) {
@@ -443,8 +663,49 @@ final class SmoothPDFContainer: NSView {
             last.removeFromSuperview()
         }
 
+        for (i, pv) in pageViews.enumerated() {
+            pv.pageIndex = i
+            pv.onClick = { [weak self] clickPoint, pageIndex in
+                self?.handlePageClick(at: clickPoint, pageIndex: pageIndex)
+            }
+        }
+
         layoutPages()
         renderPages(doc: doc, generation: generation)
+    }
+
+    private func handlePageClick(at clickPoint: NSPoint, pageIndex: Int) {
+        guard let doc = currentDocument, let page = doc.page(at: pageIndex) else { return }
+        let box = page.bounds(for: .mediaBox)
+        guard pageIndex < pageViews.count else { return }
+        let pv = pageViews[pageIndex]
+        guard pv.bounds.width > 0, pv.bounds.height > 0 else { return }
+
+        let relX = max(0, min(1, clickPoint.x / pv.bounds.width))
+        let relY = max(0, min(1, clickPoint.y / pv.bounds.height))
+
+        let pdfX = box.minX + relX * box.width
+        let pdfY = box.minY + (1.0 - relY) * box.height
+        let pdfPoint = NSPoint(x: pdfX, y: pdfY)
+
+        var extractedWord = page.selectionForWord(at: pdfPoint)?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var extractedLine = page.selectionForLine(at: pdfPoint)?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if (extractedWord == nil || extractedWord?.isEmpty == true) && (extractedLine == nil || extractedLine?.isEmpty == true) {
+            // Broaden search area around click point
+            let rect = NSRect(x: box.minX + 20, y: max(box.minY, pdfY - 25), width: max(50, box.width - 40), height: 50)
+            let nearby = page.selection(for: rect)?.string?.components(separatedBy: "\n")
+            extractedLine = nearby?.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let line = extractedLine {
+                extractedWord = line.components(separatedBy: .whitespaces).first
+            }
+        }
+
+        NotificationCenter.default.post(
+            name: .previewPageClicked,
+            object: (pageIndex: pageIndex, relativeY: relY, extractedLine: extractedLine, extractedWord: extractedWord)
+        )
     }
 
     private func layoutPages() {
@@ -454,37 +715,103 @@ final class SmoothPDFContainer: NSView {
         }
 
         let viewportWidth = scrollView.contentSize.width
+        let viewportHeight = scrollView.contentSize.height
         guard viewportWidth > 0 else { return }
-        let availableWidth = max(100, viewportWidth - horizontalMargin * 2)
 
+        let availableWidth = max(100, viewportWidth - horizontalMargin * 2)
+        let availableHeight = max(100, viewportHeight - verticalMargin * 2)
         let firstPageBox = doc.page(at: 0)?.bounds(for: .mediaBox) ?? CGRect(x: 0, y: 0, width: 595, height: 842)
-        let fitScale = availableWidth / max(1, firstPageBox.width)
-        let scaleChanged = abs(currentDisplayScale - fitScale) > 0.05
-        currentDisplayScale = fitScale
+
+        let scale: CGFloat
+        switch zoomMode {
+        case .fitWidth:
+            scale = availableWidth / max(1, firstPageBox.width)
+        case .fitPage:
+            let scaleW = availableWidth / max(1, firstPageBox.width)
+            let scaleH = availableHeight / max(1, firstPageBox.height)
+            scale = min(scaleW, scaleH)
+        case .custom(let customScale):
+            scale = customScale
+        }
+
+        let scaleChanged = abs(currentDisplayScale - scale) > 0.02
+        currentDisplayScale = scale
+
+        var maxPageWidth: CGFloat = 0
+        for i in 0..<doc.pageCount {
+            if let page = doc.page(at: i) {
+                let w = page.bounds(for: .mediaBox).width * scale
+                if w > maxPageWidth { maxPageWidth = w }
+            }
+        }
+
+        let canvasWidth = max(viewportWidth, maxPageWidth + horizontalMargin * 2)
 
         var currentY: CGFloat = verticalMargin
         for (i, pv) in pageViews.enumerated() {
             guard let page = doc.page(at: i) else { continue }
             let box = page.bounds(for: .mediaBox)
-            let w = box.width * fitScale
-            let h = box.height * fitScale
-            let x = max(horizontalMargin, (viewportWidth - w) / 2)
+            let w = box.width * scale
+            let h = box.height * scale
+            let x = (canvasWidth - w) / 2
+            pv.frame = NSRect(x: round(x), y: round(currentY), width: round(w), height: round(h))
+            pv.pageIndex = i
+            currentY += h + pageSpacing
+        }
+
+        let totalHeight = currentY - pageSpacing + verticalMargin
+        canvasView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: canvasWidth,
+            height: max(viewportHeight, totalHeight)
+        )
+
+        notifyZoomChanged()
+
+        if scaleChanged {
+            renderPages(doc: doc, generation: renderGeneration)
+        }
+    }
+
+    private func layoutPagesFast() {
+        guard let doc = currentDocument, doc.pageCount > 0 else { return }
+        let viewportWidth = scrollView.contentSize.width
+        let viewportHeight = scrollView.contentSize.height
+        guard viewportWidth > 0 else { return }
+
+        let scale = currentDisplayScale
+        var maxPageWidth: CGFloat = 0
+        for i in 0..<doc.pageCount {
+            if let page = doc.page(at: i) {
+                let w = page.bounds(for: .mediaBox).width * scale
+                if w > maxPageWidth { maxPageWidth = w }
+            }
+        }
+
+        let canvasWidth = max(viewportWidth, maxPageWidth + horizontalMargin * 2)
+
+        var currentY: CGFloat = verticalMargin
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (i, pv) in pageViews.enumerated() {
+            guard let page = doc.page(at: i) else { continue }
+            let box = page.bounds(for: .mediaBox)
+            let w = box.width * scale
+            let h = box.height * scale
+            let x = (canvasWidth - w) / 2
             pv.frame = NSRect(x: round(x), y: round(currentY), width: round(w), height: round(h))
             currentY += h + pageSpacing
         }
 
         let totalHeight = currentY - pageSpacing + verticalMargin
-        let viewportHeight = scrollView.contentSize.height
         canvasView.frame = NSRect(
             x: 0,
             y: 0,
-            width: viewportWidth,
+            width: canvasWidth,
             height: max(viewportHeight, totalHeight)
         )
-
-        if scaleChanged {
-            renderPages(doc: doc, generation: renderGeneration)
-        }
+        CATransaction.commit()
     }
 
     private func renderPages(doc: PDFDocument, generation: Int) {
@@ -580,6 +907,8 @@ private final class FlippedCanvasView: NSView {
 
 final class SinglePageView: NSView {
     private let contentLayer = CALayer()
+    var pageIndex: Int = 0
+    var onClick: ((_ clickPoint: NSPoint, _ pageIndex: Int) -> Void)?
 
     override var isFlipped: Bool { true }
 
@@ -620,6 +949,37 @@ final class SinglePageView: NSView {
         CATransaction.setDisableActions(true)
         contentLayer.contents = image
         CATransaction.commit()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 || event.modifierFlags.contains(.command) {
+            let clickPoint = convert(event.locationInWindow, from: nil)
+            showClickRipple(at: clickPoint)
+            onClick?(clickPoint, pageIndex)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    private func showClickRipple(at point: NSPoint) {
+        let ripple = CALayer()
+        ripple.bounds = CGRect(x: 0, y: 0, width: 28, height: 28)
+        ripple.position = point
+        ripple.cornerRadius = 14
+        ripple.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.35).cgColor
+        layer?.addSublayer(ripple)
+
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue = 1.0
+        anim.toValue = 0.0
+        anim.duration = 0.35
+        anim.isRemovedOnCompletion = false
+        anim.fillMode = .forwards
+        ripple.add(anim, forKey: "fade")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
+            ripple.removeFromSuperlayer()
+        }
     }
 }
 

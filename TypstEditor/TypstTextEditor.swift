@@ -203,6 +203,7 @@ let typstCompletions: [Completion] = [
 
 struct TypstTextEditor: NSViewRepresentable {
     @Binding var text: String
+    var totalPages: Int = 1
     var onTextChange: (String) -> Void
     var onCaretChange: ((Double) -> Void)? = nil
 
@@ -245,6 +246,7 @@ struct TypstTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
         guard let tv = scrollView.documentView as? NSTextView else { return }
         if tv.string != text {
             let sel = tv.selectedRange()
@@ -265,7 +267,123 @@ struct TypstTextEditor: NSViewRepresentable {
         var currentCompletions: [Completion] = []
         var completionTriggerRange: NSRange = .init(location: NSNotFound, length: 0)
 
-        init(_ parent: TypstTextEditor) { self.parent = parent }
+        init(_ parent: TypstTextEditor) {
+            self.parent = parent
+            super.init()
+            NotificationCenter.default.addObserver(self, selector: #selector(handleJumpToLine(_:)), name: .jumpToSourceLine, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(handlePreviewClick(_:)), name: .previewPageClicked, object: nil)
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        @objc func handleJumpToLine(_ note: Notification) {
+            guard let lineNum = note.object as? Int, let tv = textView else { return }
+            let text = tv.string as NSString
+            var currentLine = 1
+            var targetRange = NSRange(location: 0, length: 0)
+            text.enumerateSubstrings(in: NSRange(location: 0, length: text.length), options: .byLines) { _, range, _, stop in
+                if currentLine == lineNum {
+                    targetRange = range
+                    stop.pointee = true
+                }
+                currentLine += 1
+            }
+            tv.setSelectedRange(targetRange)
+            tv.scrollRangeToVisible(targetRange)
+            tv.showFindIndicator(for: targetRange)
+            tv.window?.makeFirstResponder(tv)
+        }
+
+        @objc func handlePreviewClick(_ note: Notification) {
+            guard let tv = textView else { return }
+            let text = tv.string as NSString
+            let lines = (text as String).components(separatedBy: "\n")
+            guard !lines.isEmpty else { return }
+
+            let pageIndex: Int
+            let relativeY: CGFloat
+            let extractedLine: String?
+            let extractedWord: String?
+
+            if let info = note.object as? (pageIndex: Int, relativeY: CGFloat, extractedLine: String?, extractedWord: String?) {
+                pageIndex = info.pageIndex
+                relativeY = info.relativeY
+                extractedLine = info.extractedLine
+                extractedWord = info.extractedWord
+            } else if let info = note.object as? (pageIndex: Int, relativeY: CGFloat) {
+                pageIndex = info.pageIndex
+                relativeY = info.relativeY
+                extractedLine = nil
+                extractedWord = nil
+            } else {
+                return
+            }
+
+            let totalPages = max(1, parent.totalPages)
+            let estimatedFrac = (CGFloat(pageIndex) + relativeY) / CGFloat(totalPages)
+            let estimatedLineIdx = Int(round(estimatedFrac * CGFloat(lines.count - 1)))
+
+            // Build candidate text fragments to search for in source
+            var candidates: [String] = []
+            if let rawLine = extractedLine?.trimmingCharacters(in: .whitespacesAndNewlines), !rawLine.isEmpty {
+                let clean = rawLine.replacingOccurrences(of: "^[•\\-\\–\\*\\d\\.]+\\s*", with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.count >= 4 {
+                    candidates.append(clean)
+                }
+                let words = clean.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if words.count >= 3 {
+                    candidates.append(words.prefix(4).joined(separator: " "))
+                    candidates.append(words.prefix(3).joined(separator: " "))
+                }
+            }
+            if let word = extractedWord?.trimmingCharacters(in: .whitespacesAndNewlines), word.count >= 3 {
+                candidates.append(word)
+            }
+
+            var targetLineIdx = min(max(0, estimatedLineIdx), lines.count - 1)
+            var matchedCandidate: String? = nil
+
+            for candidate in candidates {
+                var matchingLineIndices: [Int] = []
+                for (idx, line) in lines.enumerated() {
+                    if line.localizedCaseInsensitiveContains(candidate) {
+                        matchingLineIndices.append(idx)
+                    }
+                }
+                if !matchingLineIndices.isEmpty {
+                    targetLineIdx = matchingLineIndices.min(by: { abs($0 - estimatedLineIdx) < abs($1 - estimatedLineIdx) })!
+                    matchedCandidate = candidate
+                    break
+                }
+            }
+
+            var currentLine = 0
+            var lineRange = NSRange(location: 0, length: 0)
+            text.enumerateSubstrings(in: NSRange(location: 0, length: text.length), options: .byLines) { _, range, _, stop in
+                if currentLine == targetLineIdx {
+                    lineRange = range
+                    stop.pointee = true
+                }
+                currentLine += 1
+            }
+
+            var highlightRange = lineRange
+            if let candidate = matchedCandidate {
+                let lineSubstring = text.substring(with: lineRange) as NSString
+                let sub = lineSubstring.range(of: candidate, options: .caseInsensitive)
+                if sub.location != NSNotFound {
+                    highlightRange = NSRange(location: lineRange.location + sub.location, length: sub.length)
+                }
+            }
+
+            tv.setSelectedRange(highlightRange)
+            tv.scrollRangeToVisible(highlightRange)
+            tv.showFindIndicator(for: highlightRange)
+            tv.window?.makeFirstResponder(tv)
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }

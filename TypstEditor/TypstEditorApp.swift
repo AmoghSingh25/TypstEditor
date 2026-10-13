@@ -35,6 +35,30 @@ struct TypstEditorApp: App {
                 Divider()
                 Button("Export PDF…") { state.exportPDF() }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(state.lastExportData == nil)
+                Button("Export High-Res PNG (3×)…") { state.exportPNG() }
+                    .disabled(state.pdfDocument == nil)
+                Button("Export Vector SVG…") { state.exportSVG() }
+                    .disabled(state.activeURL == nil || !state.activeIsTyp)
+            }
+            CommandMenu("View") {
+                Button("Zoom In") { state.zoomIn() }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("Zoom Out") { state.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size (100%)") { state.zoomSetPercentage(100) }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("Fit to Width") { state.zoomFitWidth() }
+                    .keyboardShortcut("0", modifiers: .command)
+                Button("Fit to Page") { state.zoomFitPage() }
+                    .keyboardShortcut("0", modifiers: [.command, .option])
+                Divider()
+                Button("Previous Page") { state.jumpToPage(state.currentPage - 1) }
+                    .keyboardShortcut("[", modifiers: .command)
+                    .disabled(state.currentPage <= 1)
+                Button("Next Page") { state.jumpToPage(state.currentPage + 1) }
+                    .keyboardShortcut("]", modifiers: .command)
+                    .disabled(state.currentPage >= state.totalPages)
             }
         }
     }

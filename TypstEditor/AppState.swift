@@ -73,6 +73,14 @@ final class AppState: ObservableObject {
     @Published var totalPages: Int   = 1
     @Published var sourceProgress: Double = 0
 
+    // Diagnostic error details
+    @Published var errorLine: Int?   = nil
+    @Published var errorColumn: Int? = nil
+
+    // Preview zoom
+    @Published var zoomMode: ZoomMode = .fitWidth
+    @Published var zoomScale: CGFloat = 1.0
+
     // A persistent in-process Typst compiler runs away from the UI thread.
     private let compileQueue = DispatchQueue(label: "com.typsteditor.compiler", qos: .userInitiated)
     private var compileTimer: Timer?
@@ -82,6 +90,18 @@ final class AppState: ObservableObject {
     private var nativeCompiler: TypstNativeCompiler?
     private var nativeCompilerRoot: URL?
     private var previewSources: [URL: URL] = [:]
+
+    init() {
+        NotificationCenter.default.addObserver(
+            forName: .previewZoomChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self, let info = note.object as? (scale: CGFloat, mode: ZoomMode) else { return }
+            self.zoomScale = info.scale
+            self.zoomMode = info.mode
+        }
+    }
 
     // MARK: - Project
 
@@ -326,6 +346,8 @@ final class AppState: ObservableObject {
                     self.lastExportData = pdf
                     self.compileCount += 1
                     self.errorMessage = ""
+                    self.errorLine = nil
+                    self.errorColumn = nil
                     self.isCompiling = false
                     self.totalPages = document.pageCount
                 }
@@ -333,10 +355,31 @@ final class AppState: ObservableObject {
                 DispatchQueue.main.async {
                     guard self.compileGeneration == generation, self.activeURL == url else { return }
                     self.errorMessage = error.localizedDescription
+                    let loc = self.parseDiagnosticLocation(error.localizedDescription)
+                    self.errorLine = loc.line
+                    self.errorColumn = loc.col
                     self.isCompiling = false
                 }
             }
         }
+    }
+
+    private func parseDiagnosticLocation(_ message: String) -> (line: Int?, col: Int?) {
+        let parts = message.components(separatedBy: ":")
+        if parts.count >= 3 {
+            for i in 0..<(parts.count - 2) {
+                if let line = Int(parts[i].trimmingCharacters(in: .whitespaces)),
+                   let col = Int(parts[i+1].trimmingCharacters(in: .whitespaces)) {
+                    return (line, col)
+                }
+            }
+        }
+        return (nil, nil)
+    }
+
+    func jumpToError() {
+        guard let line = errorLine else { return }
+        NotificationCenter.default.post(name: .jumpToSourceLine, object: line)
     }
 
     private func compilerRoot(for sourceURL: URL) -> URL {
@@ -366,10 +409,8 @@ final class AppState: ObservableObject {
     // MARK: - Page navigation
 
     func jumpToPage(_ page: Int) {
-        // Notify PDFPreview via a published value it observes
         let clamped = max(1, min(page, totalPages))
         currentPage = clamped
-        // Post a notification the PDFPreview NSViewRepresentable can act on
         NotificationCenter.default.post(name: .jumpToPage, object: clamped)
     }
 
@@ -385,6 +426,59 @@ final class AppState: ObservableObject {
         try? data.write(to: dest, options: .atomic)
     }
 
+    func exportPNG() {
+        guard let doc = pdfDocument, let page = doc.page(at: max(0, min(currentPage - 1, doc.pageCount - 1))) else { return }
+        let panel = NSSavePanel()
+        let baseName = activeURL?.deletingPathExtension().lastPathComponent ?? "document"
+        panel.nameFieldStringValue = "\(baseName)_page\(currentPage).png"
+        panel.allowedContentTypes = [.png]
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        let box = page.bounds(for: .mediaBox)
+        let scale: CGFloat = 3.0 // 3x ultra-sharp resolution
+        let width = Int(ceil(box.width * scale))
+        let height = Int(ceil(box.height * scale))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.scaleBy(x: scale, y: scale)
+        page.draw(with: .mediaBox, to: ctx)
+        guard let img = ctx.makeImage() else { return }
+        let rep = NSBitmapImageRep(cgImage: img)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: dest, options: .atomic)
+    }
+
+    func exportSVG() {
+        guard let url = activeURL, activeIsTyp else { return }
+        let root = compilerRoot(for: url)
+        guard let sourceURL = previewSources[url] else { return }
+        let normalizedRootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let normalizedSourcePath = sourceURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPrefix = normalizedRootPath.hasSuffix("/") ? normalizedRootPath : normalizedRootPath + "/"
+        let relativePath = String(normalizedSourcePath.dropFirst(rootPrefix.count)).replacingOccurrences(of: "\\", with: "/")
+        let typstPath = "/" + relativePath
+
+        let panel = NSSavePanel()
+        let baseName = url.deletingPathExtension().lastPathComponent
+        panel.nameFieldStringValue = "\(baseName).svg"
+        panel.allowedContentTypes = [UTType(filenameExtension: "svg") ?? .xml]
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        compileQueue.async { [weak self] in
+            guard let self, let compiler = self.nativeCompiler else { return }
+            do {
+                let svg = try compiler.compileSVG(sourcePath: typstPath)
+                try svg.write(to: dest, atomically: true, encoding: .utf8)
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = "Failed to export SVG: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func cleanupTempDirectory() {
         stopCompiler()
         compileQueue.sync {}
@@ -396,6 +490,8 @@ final class AppState: ObservableObject {
     private func clearPDF() {
         pdfDocument   = nil
         errorMessage  = ""
+        errorLine     = nil
+        errorColumn   = nil
         lastExportURL = nil
         lastExportData = nil
         totalPages    = 0
@@ -409,12 +505,52 @@ final class AppState: ObservableObject {
             lastExportData = tabExportData[url]
             totalPages    = cached.pageCount
             errorMessage  = ""
+            errorLine     = nil
+            errorColumn   = nil
         } else {
             clearPDF()
         }
     }
+
+    // MARK: - Zoom Controls
+
+    func zoomIn() {
+        NotificationCenter.default.post(name: .zoomIn, object: nil)
+    }
+
+    func zoomOut() {
+        NotificationCenter.default.post(name: .zoomOut, object: nil)
+    }
+
+    func zoomFitWidth() {
+        NotificationCenter.default.post(name: .zoomReset, object: nil)
+    }
+
+    func zoomFitPage() {
+        NotificationCenter.default.post(name: .zoomFitPage, object: nil)
+    }
+
+    func zoomSetPercentage(_ percent: Int) {
+        NotificationCenter.default.post(name: .zoomSetPercentage, object: percent)
+    }
+}
+
+// MARK: - Zoom Mode
+
+enum ZoomMode: Equatable {
+    case fitWidth
+    case fitPage
+    case custom(CGFloat)
 }
 
 extension Notification.Name {
     static let jumpToPage = Notification.Name("jumpToPage")
+    static let jumpToSourceLine = Notification.Name("jumpToSourceLine")
+    static let previewPageClicked = Notification.Name("previewPageClicked")
+    static let zoomIn = Notification.Name("zoomIn")
+    static let zoomOut = Notification.Name("zoomOut")
+    static let zoomReset = Notification.Name("zoomReset")
+    static let zoomFitPage = Notification.Name("zoomFitPage")
+    static let zoomSetPercentage = Notification.Name("zoomSetPercentage")
+    static let previewZoomChanged = Notification.Name("previewZoomChanged")
 }
